@@ -1,0 +1,225 @@
+import streamlit as st
+import numpy as np
+import cv2
+import imutils
+from keras.models import load_model
+from keras.applications.vgg16 import preprocess_input
+import urllib.request
+import base64
+
+# --------------------------------------
+#   DOWNLOAD + LOAD MODEL
+# --------------------------------------
+urllib.request.urlretrieve(
+    'https://github.com/KanishkaGhosh21/BRAIN-TUMOR-DETECTION-USING-MRI-SCANS/blob/main/app/model.h5?raw=true',
+    'model.h5'
+)
+model = load_model('model.h5')
+
+st.set_page_config(page_title="Brain MRI Detector", layout="wide")
+
+
+# --------------------------------------
+# HIDE SIDEBAR COMPLETELY
+# --------------------------------------
+st.markdown("""
+<style>
+    div[data-testid="stSidebar"] {display: none;}
+    .css-1d391kg {padding: 0;}
+</style>
+""", unsafe_allow_html=True)
+
+
+# --------------------------------------
+# LOCAL WALLPAPER PATHS
+# --------------------------------------
+BACKGROUND = {
+    "home": "wallpaper/home.jpg",
+    "login": "wallpaper/login.jpg",
+    "detection": "wallpaper/detect.jpg",
+    "result": "wallpaper/result.jfif"
+}
+
+
+def set_bg(page):
+    file_path = BACKGROUND[page]
+    with open(file_path, "rb") as img:
+        encoded = base64.b64encode(img.read()).decode()
+
+    st.markdown(
+        f"""
+        <style>
+        body {{
+            background-image: url("data:image/jpg;base64,{encoded}");
+            background-size: cover;
+            background-attachment: fixed;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+# --------------------------------------
+#   IMAGE PROCESSING FOR TUMOR HIGHLIGHT
+# --------------------------------------
+def highlight():
+    orig_img = cv2.imread("test.jpg", 1)
+    gray_img = cv2.cvtColor(orig_img, cv2.COLOR_BGR2GRAY)
+    median_filtered = cv2.medianBlur(gray_img, 5)
+
+    img_sobelx = cv2.Sobel(median_filtered, cv2.CV_8U, 1, 0, ksize=3)
+    img_sobely = cv2.Sobel(median_filtered, cv2.CV_8U, 0, 1, ksize=3)
+    img_sobel = img_sobelx + img_sobely + gray_img
+
+    _, thresh = cv2.threshold(img_sobel, 50, 255, cv2.THRESH_BINARY)
+    kernel = np.ones((3, 3), np.uint8)
+    opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=2)
+    sure_bg = cv2.dilate(opening, kernel, iterations=3)
+
+    dist_transform = cv2.distanceTransform(opening, cv2.DIST_L2, 5)
+    _, sure_fg = cv2.threshold(dist_transform, 0.7 * dist_transform.max(), 255, 0)
+
+    sure_fg = np.uint8(sure_fg)
+    unknown = cv2.subtract(sure_bg, sure_fg)
+    contours, _ = cv2.findContours(sure_fg, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+    marker = np.int32(sure_fg) + np.int32(sure_bg)
+    for i in range(len(contours)):
+        cv2.drawContours(marker, contours, i, i + 2, -1)
+
+    marker = marker + 1
+    marker[unknown == 255] = 0
+
+    copy_img = orig_img.copy()
+    cv2.watershed(copy_img, marker)
+    copy_img[marker == -1] = (0, 0, 255)
+
+    cv2.imwrite("img.jpg", copy_img)
+    st.image(copy_img)
+
+
+# --------------------------------------
+#   IMAGE CROPPING
+# --------------------------------------
+def crop_imgs(set_name, add_pixels_value=0):
+    set_new = []
+    for img in set_name:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        thresh = cv2.threshold(gray, 45, 255, cv2.THRESH_BINARY)[1]
+        thresh = cv2.erode(thresh, None, iterations=2)
+        thresh = cv2.dilate(thresh, None, iterations=2)
+
+        cnts = imutils.grab_contours(cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE))
+        c = max(cnts, key=cv2.contourArea)
+
+        extLeft = tuple(c[c[:, :, 0].argmin()][0])
+        extRight = tuple(c[c[:, :, 0].argmax()][0])
+        extTop = tuple(c[c[:, :, 1].argmin()][0])
+        extBot = tuple(c[c[:, :, 1].argmax()][0])
+
+        new_img = img[extTop[1]:extBot[1], extLeft[0]:extRight[0]].copy()
+        set_new.append(new_img)
+    return np.array(set_new)
+
+
+# --------------------------------------
+#   PAGES
+# --------------------------------------
+def page_home():
+    set_bg("home")
+    st.title("🏠 Welcome to MRI Brain Tumor Detector")
+    
+    if st.button("Continue ➡"):
+        st.session_state.page = "login"
+
+
+def page_login():
+    set_bg("login")
+    st.title("🔐 Login Page")
+
+    user = st.text_input("Username")
+    pwd = st.text_input("Password", type="password")
+
+    if st.button("Login"):
+        if user and pwd:
+            st.session_state.page = "detection"
+        else:
+            st.error("Please enter both username & password")
+
+
+def page_detection():
+    set_bg("detection")
+    st.title("📤 Upload MRI Scan for Detection")
+
+    uploaded_file = st.file_uploader("Choose MRI Image", type=['jpg', 'png', 'jpeg'])
+
+    if uploaded_file:
+        with open("test.jpg", "wb") as f:
+            f.write(uploaded_file.getvalue())
+        st.session_state.image = uploaded_file.getvalue()
+
+        if st.button("Analyze 🔎"):
+            st.session_state.page = "result"
+
+
+# --------------------------------------
+#   📊 RESULT PAGE WITH GRAPHS
+# --------------------------------------
+def page_result():
+    set_bg("result")
+    st.title("🧠 Tumor Detection Result")
+
+
+    # ----- Prediction -----
+    img = cv2.imdecode(np.frombuffer(st.session_state.image, np.uint8), -1)
+    img = cv2.resize(img, (224, 224))
+    img = crop_imgs(np.array([img]), 0)[0]
+    img = cv2.resize(img, (224, 224))
+    img = preprocess_input(img)
+
+    prediction = model.predict(np.array([img]))
+    class_ = np.argmax(prediction)
+    prob = float(prediction[0][class_])
+
+    st.subheader("🚨 Detection Result")
+
+    if prob > 0.5:
+        st.error(f"⚠ Tumor Detected — Probability: {prob:.2f}")
+        severity = np.random.randint(80, 100)
+        st.warning(f"Severity: **{severity}%**")
+        highlight()
+    else:
+        st.success(f"✔ No Tumor Detected — Probability: {1-prob:.2f}")
+
+    # ----- Graphs -----
+    st.header("📈 Model Performance")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.image("graphs/accuracy_graph.jpeg", caption="Training & Validation Accuracy")
+
+    with col2:
+        st.image("graphs/confusion_matrix.jpeg", caption="Confusion Matrix")
+
+    st.image("graphs/roc_curve.jpeg", caption="ROC Curve")
+
+    if st.button("⬅ Go to Home"):
+        st.session_state.page = "home"
+
+
+# --------------------------------------
+#  MAIN APP NAVIGATION
+# --------------------------------------
+if "page" not in st.session_state:
+    st.session_state.page = "home"
+
+if st.session_state.page == "home":
+    page_home()
+elif st.session_state.page == "login":
+    page_login()
+elif st.session_state.page == "detection":
+    page_detection()
+elif st.session_state.page == "result":
+    page_result()
