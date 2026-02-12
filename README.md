@@ -1,0 +1,1 @@
+Brain Tumor Detection is a machine learning project that classifies MRI brain scans to determine whether a brain tumor is present or not. This repository includes code, preprocessing steps, and analysis notebook to build and evaluate the detection model.
